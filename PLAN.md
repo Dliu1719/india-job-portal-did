@@ -34,8 +34,8 @@ All regressions use `feols` from fixest. Standard errors clustered at `participa
 
 - [x] Rmd written and knitting
 - [x] etable fixed (keep_raw for interaction + D)
-- [ ] Final PDF rendered and reviewed
-- [ ] Git init + initial commit
+- [x] Final PDF rendered and reviewed
+- [x] Git init + initial commit
 - [ ] Add to World Bank application materials
 
 ## Files
