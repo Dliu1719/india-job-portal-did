@@ -216,16 +216,12 @@ The pre-treatment coefficients (event time $< 0$) are all close to zero and stat
 # Pooling cohorts introduces mild staggered-adoption concerns but provides more
 # identifying variation for estimating cumulative effects year by year.
 df_dl <- df %>%
-  mutate(jobportal_year = ifelse(is.na(jobportal_year), 9999, jobportal_year),
-         D = as.integer(year >= jobportal_year)) %>%
-  group_by(participant_id) %>%
-  mutate(
-    D_l1 = lead(D, 1),
-    D_l2 = lead(D, 2),
-    D_l3 = lead(D, 3),
-    D_l4 = lead(D, 4)
-  ) %>%
-  ungroup()
+  mutate(jobportal_year = ifelse(is.na(jobportal_year), 2025, jobportal_year),
+         D    = as.integer(year >= jobportal_year),
+         D_l1 = lead(D, 1),
+         D_l2 = lead(D, 2),
+         D_l3 = lead(D, 3),
+         D_l4 = lead(D, 4))
 
 dl <- feols(
   salaries ~ D + D_l1 + D_l2 + D_l3 + D_l4 | participant_id + year,
@@ -262,7 +258,7 @@ ggplot(cumul_df, aes(x = year_after, y = cumulative_effect)) +
     x        = "Years After Portal Access",
     y        = "Cumulative Salary Effect (Rupees)",
     title    = "Figure 3: Cumulative Effect of Job Portal Access on Salaries",
-    subtitle = "Distributed lag estimates with 95% confidence intervals. Year 1 = treatment year."
+    subtitle = "Distributed lag estimates. 95% CIs computed via delta method but too narrow to render visibly\n(synthetic data artifact: SE < 0.1 rupees at each horizon)."
   ) +
   theme_minimal(base_size = 11) +
   theme(
@@ -274,7 +270,7 @@ cat("Cumulative effect after 5 years:",
     round(cumulative["D_l4"], 2), "rupees\n")
 ```
 
-The distributed lag confirms the direction of the event study: an immediate effect of roughly 50 rupees in year one, growing to a cumulative 63 rupees by year five. The incremental gain beyond year one is modest — about 13 rupees over four additional years — which tempers the stronger accumulation story suggested by the event study alone. The two results are not contradictory: the event study conditions on the 2006 cohort only, while the distributed lag pools all cohorts, and cohort-level heterogeneity in returns could explain the difference.
+The distributed lag confirms the direction of the event study: an immediate effect of approximately 55 rupees in year one, growing to a cumulative 63 rupees by year five. The incremental gain beyond year one is modest — about 8 rupees over four additional years — which tempers the stronger accumulation story suggested by the event study alone. The two results are not contradictory: the event study conditions on the 2006 cohort only, while the distributed lag pools all cohorts, and cohort-level heterogeneity in returns could explain the difference.
 
 ## Conclusion
 
