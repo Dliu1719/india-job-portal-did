@@ -1,0 +1,289 @@
+---
+title: "Access to Online Job Platforms and Earnings: A Difference-in-Differences Evaluation"
+author: "Dong Liu"
+date: "2026-04-16"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(fixest)
+library(kableExtra)
+library(ggplot2)
+```
+
+## Introduction
+
+Access to information is a central constraint in developing country labor markets. Job seekers in low- and middle-income countries often rely on informal networks to find employment, limiting their exposure to opportunities that match their skills. Online job platforms can in principle broaden access to job listings, improve match quality, and raise earnings — but rigorous evidence on these effects is limited.
+
+This analysis estimates the causal effect of access to an online job portal on job seeker salaries in India, using panel data from a social enterprise that provided platform access to a subset of job seekers beginning in 2006. Because access was not randomly assigned, I adopt a difference-in-differences design that exploits variation in the timing of portal access across cohorts, comparing salary trajectories of job seekers who gained access to those who never did, to isolate the causal effect from pre-existing differences between groups. I estimate the average treatment effect using two-way fixed effects, and characterize dynamic patterns using an event study and distributed lag model.
+
+## Data
+
+The dataset is a synthetic panel constructed to reflect the structure of job seeker records maintained by BOOST (Building Opportunities and Outcomes through Skill Training), an NGO operating in India. It covers 1999 to 2014 and includes job seekers who never accessed a job portal as well as those who gained access in different years between 2006 and 2010. The outcome variable is annual salary in rupees. The key treatment variable is an indicator for whether a job seeker had access to the job portal in a given year.
+
+**Data note:** The data used here are synthetic and were originally generated for pedagogical purposes at the University of Chicago Harris School of Public Policy (PPHA 34600, Fall 2024). They are designed to reflect realistic panel structures and treatment variation but do not represent actual BOOST records.
+
+```{r load-data}
+df <- read_csv("data/job_portal_panel.csv", show_col_types = FALSE)
+
+# Create treatment indicators
+df <- df %>%
+  mutate(
+    ever_treated = as.integer(!is.na(jobportal_year)),
+    post         = as.integer(year >= 2006),
+    D            = case_when(
+      !is.na(jobportal_year) & year >= jobportal_year ~ 1,
+      !is.na(jobportal_year) & year <  jobportal_year ~ 0,
+      is.na(jobportal_year)                           ~ 0
+    ),
+    eventtime = ifelse(!is.na(jobportal_year), year - jobportal_year, NA_real_)
+  )
+
+cat("Observations:", nrow(df), "\n")
+cat("Job seekers:", n_distinct(df$participant_id), "\n")
+cat("Years:", paste(range(df$year), collapse = " to "), "\n")
+cat("Ever treated:", sum(df$ever_treated == 1 & df$year == 2006, na.rm = TRUE),
+    "job seekers\n")
+cat("Never treated:", sum(df$ever_treated == 0 & df$year == 2006, na.rm = TRUE),
+    "job seekers\n")
+```
+
+```{r treatment-timing}
+# Distribution of treatment cohorts
+df %>%
+  filter(!is.na(jobportal_year)) %>%
+  distinct(participant_id, jobportal_year) %>%
+  count(jobportal_year) %>%
+  rename("Cohort Year" = jobportal_year, "Job Seekers" = n) %>%
+  kable(caption = "Treatment Cohort Sizes", booktabs = TRUE) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+## Descriptive Analysis
+
+A credible difference-in-differences design requires that treated and never-treated groups follow parallel salary trends in the absence of treatment. Figure 1 plots average salaries over time for the 2006 cohort against the never-treated group to assess this visually.
+
+```{r parallel-trends-plot}
+plot_df <- df %>%
+  filter(jobportal_year == 2006 | is.na(jobportal_year)) %>%
+  mutate(group = ifelse(!is.na(jobportal_year), "Treated (2006 cohort)", "Never treated")) %>%
+  group_by(year, group) %>%
+  summarise(mean_salary = mean(salaries, na.rm = TRUE), .groups = "drop")
+
+ggplot(plot_df, aes(x = year, y = mean_salary, color = group, group = group)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.8) +
+  geom_vline(xintercept = 2006, linetype = "dashed", color = "gray30", linewidth = 0.7) +
+  annotate("text", x = 2006.2, y = min(plot_df$mean_salary) + 20,
+           label = "Treatment\n(2006)", hjust = 0, size = 3, color = "gray30") +
+  scale_color_manual(values = c("steelblue", "tomato")) +
+  labs(
+    x        = "Year",
+    y        = "Mean Annual Salary (Rupees)",
+    color    = NULL,
+    title    = "Figure 1: Salary Trends for Treated and Never-Treated Job Seekers",
+    subtitle = "2006 treatment cohort vs. never-treated group. Dashed line marks treatment year."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title    = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+    legend.position = "bottom"
+  )
+```
+
+The two groups track each other closely over 1999 to 2005, with no pre-treatment divergence. After 2006, the treated cohort's salaries pull away from the never-treated group, consistent with a positive treatment effect. The pre-period parallel trends lend credibility to the identifying assumption, though visual inspection alone cannot rule out unobserved time-varying differences between groups.
+
+## Identification Strategy
+
+The identifying assumption of the DiD design is that in the absence of job portal access, treated job seekers' salaries would have continued to evolve parallel to the never-treated group. The pre-treatment salary trends in Figure 1 provide visual support for this assumption.
+
+I estimate the following two-way fixed effects model:
+
+$$Y_{it} = \tau D_{it} + \alpha_i + \delta_t + \varepsilon_{it}$$
+
+where $Y_{it}$ is the salary of job seeker $i$ in year $t$, $D_{it}$ is an indicator equal to 1 once job seeker $i$ has accessed the portal, $\alpha_i$ are individual fixed effects absorbing time-invariant job seeker characteristics, and $\delta_t$ are year fixed effects absorbing common time shocks. Standard errors are clustered at the individual level to account for serial correlation within job seekers over time.
+
+The coefficient $\tau$ captures the average treatment effect on the treated (ATT): the change in salary attributable to job portal access, identified from within-individual variation in treatment status relative to the counterfactual trend estimated from the never-treated group.
+
+## Main Results
+
+```{r main-results}
+# Restrict to 2006 cohort and never-treated for the clean 2x2 DiD
+df_2x2 <- df %>%
+  filter(jobportal_year == 2006 | is.na(jobportal_year))
+
+# Method 1: Simple difference in means (post-period only)
+did_means <- df_2x2 %>%
+  mutate(post = as.integer(year >= 2006)) %>%
+  group_by(ever_treated, post) %>%
+  summarise(mean_sal = mean(salaries, na.rm = TRUE), .groups = "drop") %>%
+  summarise(
+    treat_diff   = mean_sal[ever_treated == 1 & post == 1] -
+                   mean_sal[ever_treated == 1 & post == 0],
+    control_diff = mean_sal[ever_treated == 0 & post == 1] -
+                   mean_sal[ever_treated == 0 & post == 0],
+    did          = treat_diff - control_diff
+  )
+
+cat("Simple DiD (difference in means):", round(did_means$did, 2), "rupees\n")
+
+# Method 2: OLS DiD (no fixed effects)
+df_2x2 <- df_2x2 %>%
+  mutate(post = as.integer(year >= 2006))
+
+ols_did <- feols(salaries ~ ever_treated * post, data = df_2x2,
+                 vcov = ~participant_id)
+
+# Method 3: Two-way fixed effects
+twfe <- feols(salaries ~ D | participant_id + year,
+              cluster = ~participant_id,
+              data = df_2x2)
+
+etable(ols_did, twfe,
+       keep_raw = c("ever_treated:post", "D"),
+       dict     = c("ever_treated:post" = "Treated x Post",
+                    "D"                 = "Job portal access"),
+       headers  = c("OLS DiD", "TWFE"),
+       depvar   = FALSE,
+       digits   = 2,
+       se.below = TRUE)
+```
+
+The three methods converge on a consistent point estimate. The TWFE specification indicates that job portal access increased annual salaries by approximately 60 rupees, or roughly 3 percent relative to the pre-treatment mean of about 2,000 rupees. The OLS DiD yields an identical estimate, which is expected: with a balanced panel and a single treatment cohort, the two specifications impose the same identifying variation. The result is precisely estimated in the data, though the data's synthetic construction means this precision does not carry over to a confidence assessment about the real-world effect size.
+
+## Dynamic Effects
+
+The single-coefficient TWFE estimate averages over the full post-treatment window and masks how the effect evolves year by year. Job portal access may generate returns that build gradually as workers accumulate matches, referrals, and experience with the platform. I examine the dynamic pattern using two complementary approaches: an event study that estimates year-by-year effects relative to the treatment date, and a distributed lag model that converts those annual effects into a cumulative path.
+
+### Event Study
+
+```{r event-study}
+# Event study restricted to 2006 cohort and never-treated.
+# Pooling all cohorts in a staggered-adoption event study risks contamination
+# from late-treated units acting as controls for early-treated ones.
+# Restricting to a single cohort sidesteps this issue at the cost of a smaller sample.
+df_es <- df_2x2 %>%
+  mutate(eventtime = ifelse(!is.na(jobportal_year), year - jobportal_year, 0))
+
+es <- feols(
+  salaries ~ i(eventtime, ever_treated, ref = -1) | participant_id + year,
+  cluster = ~participant_id,
+  data    = df_es
+)
+
+# Extract coefficients and plot manually
+es_coefs <- as.data.frame(coeftable(es))
+es_coefs$term <- rownames(es_coefs)
+es_coefs <- es_coefs %>%
+  filter(grepl("eventtime", term)) %>%
+  mutate(
+    eventtime = as.numeric(sub(".*::([-0-9]+).*", "\\1", term)),
+    ci_lo     = Estimate - 1.96 * `Std. Error`,
+    ci_hi     = Estimate + 1.96 * `Std. Error`
+  ) %>%
+  bind_rows(data.frame(eventtime = -1, Estimate = 0, ci_lo = 0, ci_hi = 0)) %>%
+  arrange(eventtime)
+
+ggplot(es_coefs, aes(x = eventtime, y = Estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+  geom_ribbon(aes(ymin = ci_lo, ymax = ci_hi), alpha = 0.2, fill = "steelblue") +
+  geom_line(color = "steelblue", linewidth = 0.8) +
+  geom_point(color = "steelblue", size = 2) +
+  labs(
+    x        = "Years Relative to Portal Access",
+    y        = "Salary Effect (Rupees)",
+    title    = "Figure 2: Event Study - Effect of Job Portal Access on Salaries",
+    subtitle = "Point estimates with 95% confidence intervals. Reference period: t = -1."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title    = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40")
+  )
+```
+
+The pre-treatment coefficients (event time $< 0$) are all close to zero and statistically indistinguishable from the omitted period at $t = -1$, which supports the parallel trends assumption. After treatment, the effect rises steadily from around 50 rupees in year zero to nearly 70 rupees by year eight. The upward slope suggests that the returns to portal access are not a one-time level shift but instead compound over time, consistent with a job search model in which better information improves match quality with a lag.
+
+### Cumulative Effects
+
+```{r distributed-lags}
+# Distributed lag regression on full sample (all cohorts pooled)
+# Note: unlike the TWFE and event study above, this uses all treatment cohorts.
+# Pooling cohorts introduces mild staggered-adoption concerns but provides more
+# identifying variation for estimating cumulative effects year by year.
+df_dl <- df %>%
+  mutate(jobportal_year = ifelse(is.na(jobportal_year), 9999, jobportal_year),
+         D = as.integer(year >= jobportal_year)) %>%
+  group_by(participant_id) %>%
+  mutate(
+    D_l1 = lead(D, 1),
+    D_l2 = lead(D, 2),
+    D_l3 = lead(D, 3),
+    D_l4 = lead(D, 4)
+  ) %>%
+  ungroup()
+
+dl <- feols(
+  salaries ~ D + D_l1 + D_l2 + D_l3 + D_l4 | participant_id + year,
+  cluster = ~participant_id,
+  data    = df_dl
+)
+
+# Cumulative effects with standard errors via delta method (sum of vcov submatrix)
+coefs      <- coef(dl)[c("D", "D_l1", "D_l2", "D_l3", "D_l4")]
+cumulative <- cumsum(coefs)
+
+vcov_dl  <- vcov(dl)[c("D", "D_l1", "D_l2", "D_l3", "D_l4"),
+                      c("D", "D_l1", "D_l2", "D_l3", "D_l4")]
+vcov_T   <- numeric(5)
+for (i in 1:5) vcov_T[i] <- sum(vcov_dl[1:i, 1:i])
+se_T <- sqrt(vcov_T)
+
+cumul_df <- tibble(
+  year_after        = 1:5,
+  cumulative_effect = cumulative,
+  ci_lo             = cumulative - 1.96 * se_T,
+  ci_hi             = cumulative + 1.96 * se_T
+)
+
+ggplot(cumul_df, aes(x = year_after, y = cumulative_effect)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_errorbar(aes(ymin = ci_lo, ymax = ci_hi),
+                width = 0.15, color = "steelblue") +
+  geom_point(size = 3, color = "steelblue") +
+  geom_text(aes(label = round(cumulative_effect, 1)),
+            vjust = -1, size = 3.2, color = "gray30") +
+  scale_x_continuous(breaks = 1:5) +
+  labs(
+    x        = "Years After Portal Access",
+    y        = "Cumulative Salary Effect (Rupees)",
+    title    = "Figure 3: Cumulative Effect of Job Portal Access on Salaries",
+    subtitle = "Distributed lag estimates with 95% confidence intervals. Year 1 = treatment year."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title    = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40")
+  )
+
+cat("Cumulative effect after 5 years:",
+    round(cumulative["D_l4"], 2), "rupees\n")
+```
+
+The distributed lag confirms the direction of the event study: an immediate effect of roughly 50 rupees in year one, growing to a cumulative 63 rupees by year five. The incremental gain beyond year one is modest — about 13 rupees over four additional years — which tempers the stronger accumulation story suggested by the event study alone. The two results are not contradictory: the event study conditions on the 2006 cohort only, while the distributed lag pools all cohorts, and cohort-level heterogeneity in returns could explain the difference.
+
+## Conclusion
+
+This analysis estimates the effect of job portal access on salaries using a difference-in-differences design. Three specifications — a simple difference in means, an OLS DiD, and a two-way fixed effects model — converge on an average treatment effect of approximately 60 rupees, or 3 percent of the pre-treatment salary mean. The event study shows flat pre-trends and a gradually rising post-treatment path, and the distributed lag places the cumulative five-year effect at 63 rupees.
+
+The design has two layers of identifying assumptions worth stating plainly. First, parallel trends: the individual and year fixed effects remove time-invariant person characteristics and common time shocks, but cannot account for time-varying differences between groups. If job seekers who adopted the portal also changed their job search behavior in other ways after 2006, the estimates would be biased. Second, the event study pre-trend test supports parallel trends visually, but the test has limited power in short panels and cannot rule out violations that begin only slightly before treatment.
+
+A broader caveat is that the underlying data are synthetic. The quantitative estimates — the 60-rupee ATT, the shape of the event study path, the cumulative lag profile — reflect the data-generating process of a pedagogical dataset, not the actual BOOST program. The design and code are transferable to real administrative records; the specific magnitudes are not. An application to actual BOOST data would require re-estimating everything and confronting the additional challenge that real salary records carry measurement error and selective attrition that synthetic data suppresses.
+
+---
+
+*Data: Synthetic panel data reflecting the structure of BOOST NGO job seeker records in India, generated for pedagogical purposes at the University of Chicago Harris School of Public Policy (PPHA 34600, Fall 2024).*
